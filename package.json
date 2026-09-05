@@ -1,0 +1,53 @@
+{
+    "name": "assetassure-resource-collector",
+    "version": "0.1.0",
+    "description": "Browser library that observes loaded JS/CSS resources and reports them to the AssetAssure API",
+    "license": "MIT",
+    "author": "natepage",
+    "type": "module",
+    "main": "./dist/index.cjs",
+    "module": "./dist/index.js",
+    "types": "./types/index.d.ts",
+    "unpkg": "./dist/assetassure-resource-collector.min.js",
+    "jsdelivr": "./dist/assetassure-resource-collector.min.js",
+    "exports": {
+        ".": {
+            "types": "./types/index.d.ts",
+            "import": "./dist/index.js",
+            "require": "./dist/index.cjs",
+            "default": "./dist/index.js"
+        },
+        "./package.json": "./package.json"
+    },
+    "files": [
+        "dist",
+        "types"
+    ],
+    "sideEffects": false,
+    "scripts": {
+        "build": "node scripts/build.mjs",
+        "test": "node --test",
+        "prepublishOnly": "npm run build && npm test"
+    },
+    "devDependencies": {
+        "esbuild": "^0.25.0"
+    },
+    "engines": {
+        "node": ">=18"
+    },
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/PageyCorp/assetassure-resource-collector.git"
+    },
+    "bugs": {
+        "url": "https://github.com/PageyCorp/assetassure-resource-collector/issues"
+    },
+    "homepage": "https://github.com/PageyCorp/assetassure-resource-collector#readme",
+    "keywords": [
+        "assetassure",
+        "resource",
+        "collector",
+        "performance-observer",
+        "browser"
+    ]
+}

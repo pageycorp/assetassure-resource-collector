@@ -1,0 +1,316 @@
+const RESOURCE_TYPE_PATTERNS = Object.freeze({
+    js: /\.js(\?.*)?(#.*)?$/i,
+    css: /\.css(\?.*)?(#.*)?$/i,
+});
+
+const API_DOMAIN_PATTERN = /^api\.[a-z0-9.-]+\.assetassure\.io$/i;
+const SIGNED_URL_ACTION = 'asset_check';
+const SIGNED_URL_PATH = '/signed-url';
+
+const DEFAULTS = Object.freeze({
+    resourceTypes: ['js'],
+    batchSize: 50,
+    flushIntervalMs: 2000,
+    signedUrlTtlMs: 60_000,
+    onError: null,
+});
+
+/**
+ * Observes resources loaded by the current page and reports their URIs to the
+ * AssetAssure API in batches.
+ *
+ * @example
+ * const collector = new ResourceCollector({
+ *   publicToken: 'pk_live_...',
+ *   apiDomain: 'api.acme.assetassure.io',
+ * });
+ * collector.start();
+ */
+export class ResourceCollector {
+    static RESOURCE_TYPES = Object.freeze(Object.keys(RESOURCE_TYPE_PATTERNS));
+
+    #publicToken;
+    #signedUrlEndpoint;
+    #resourcePatterns;
+    #batchSize;
+    #flushIntervalMs;
+    #signedUrlTtlMs;
+    #onError;
+
+    #seen = new Set();
+    #pending = [];
+    #observer = null;
+    #intervalId = null;
+    #signedUrlPromise = null;
+    #signedUrlExpiresAt = 0;
+    #inFlight = new Set();
+
+    /**
+     * @param {object} options
+     * @param {string} options.publicToken   Public API token.
+     * @param {string} options.apiDomain     Must match `api.<subdomain>.assetassure.io`.
+     * @param {Array<'js'|'css'>} [options.resourceTypes=['js']]
+     * @param {number} [options.batchSize=50]
+     * @param {number} [options.flushIntervalMs=2000]
+     * @param {number} [options.signedUrlTtlMs=60000]  How long a signed URL is reused before a fresh one is requested.
+     * @param {(error: Error) => void} [options.onError]  Called when a request fails. Errors are otherwise swallowed.
+     */
+    constructor(options = {}) {
+        const {
+            publicToken,
+            apiDomain,
+            resourceTypes = DEFAULTS.resourceTypes,
+            batchSize = DEFAULTS.batchSize,
+            flushIntervalMs = DEFAULTS.flushIntervalMs,
+            signedUrlTtlMs = DEFAULTS.signedUrlTtlMs,
+            onError = DEFAULTS.onError,
+        } = options;
+
+        if (typeof publicToken !== 'string' || publicToken.length === 0) {
+            throw new TypeError('ResourceCollector: publicToken is required');
+        }
+
+        if (typeof apiDomain !== 'string' || !API_DOMAIN_PATTERN.test(apiDomain)) {
+            throw new TypeError('ResourceCollector: apiDomain must match "api.<subdomain>.assetassure.io"');
+        }
+
+        if (!Array.isArray(resourceTypes) || resourceTypes.length === 0) {
+            throw new TypeError('ResourceCollector: resourceTypes must be a non-empty array');
+        }
+
+        const unknown = resourceTypes.filter((type) => !(type in RESOURCE_TYPE_PATTERNS));
+        if (unknown.length > 0) {
+            throw new TypeError(
+                `ResourceCollector: unknown resourceTypes ${JSON.stringify(unknown)}; expected one of ${JSON.stringify(ResourceCollector.RESOURCE_TYPES)}`,
+            );
+        }
+
+        if (!Number.isInteger(batchSize) || batchSize < 1) {
+            throw new TypeError('ResourceCollector: batchSize must be a positive integer');
+        }
+
+        if (!Number.isFinite(flushIntervalMs) || flushIntervalMs < 0) {
+            throw new TypeError('ResourceCollector: flushIntervalMs must be a non-negative number');
+        }
+
+        if (onError !== null && typeof onError !== 'function') {
+            throw new TypeError('ResourceCollector: onError must be a function');
+        }
+
+        this.#publicToken = publicToken;
+        this.#signedUrlEndpoint = `https://${apiDomain}${SIGNED_URL_PATH}`;
+        this.#resourcePatterns = resourceTypes.map((type) => RESOURCE_TYPE_PATTERNS[type]);
+        this.#batchSize = batchSize;
+        this.#flushIntervalMs = flushIntervalMs;
+        this.#signedUrlTtlMs = signedUrlTtlMs;
+        this.#onError = onError;
+    }
+
+    /** Whether the collector is currently observing. */
+    get running() {
+        return this.#observer !== null;
+    }
+
+    /**
+     * Begin observing resource timing entries. Safe to call more than once.
+     * Does nothing in environments without `PerformanceObserver`.
+     *
+     * @returns {this}
+     */
+    start() {
+        if (this.running || typeof PerformanceObserver === 'undefined') {
+            return this;
+        }
+
+        this.#observer = new PerformanceObserver((list) => {
+            this.#processEntries(list.getEntries());
+        });
+
+        this.#observer.observe({ type: 'resource', buffered: true });
+
+        if (this.#flushIntervalMs > 0) {
+            this.#intervalId = setInterval(() => {
+                this.flush();
+            }, this.#flushIntervalMs);
+        }
+
+        if (typeof window !== 'undefined') {
+            window.addEventListener('pagehide', this.#handlePageHide);
+        }
+        if (typeof document !== 'undefined') {
+            document.addEventListener('visibilitychange', this.#handleVisibilityChange);
+        }
+
+        return this;
+    }
+
+    /**
+     * Stop observing and flush anything still pending.
+     *
+     * @returns {Promise<void>} Resolves once the final flush has settled.
+     */
+    stop() {
+        if (!this.running) {
+            return Promise.resolve();
+        }
+
+        this.#observer.disconnect();
+        this.#observer = null;
+
+        if (this.#intervalId !== null) {
+            clearInterval(this.#intervalId);
+            this.#intervalId = null;
+        }
+
+        if (typeof window !== 'undefined') {
+            window.removeEventListener('pagehide', this.#handlePageHide);
+        }
+        if (typeof document !== 'undefined') {
+            document.removeEventListener('visibilitychange', this.#handleVisibilityChange);
+        }
+
+        return this.flush();
+    }
+
+    /**
+     * Send any pending URIs immediately.
+     *
+     * @returns {Promise<void>} Resolves once all in-flight requests have settled.
+     */
+    flush() {
+        if (this.#pending.length > 0) {
+            this.#send(this.#pending.splice(0, this.#pending.length));
+        }
+
+        return Promise.allSettled(this.#inFlight).then(() => undefined);
+    }
+
+    #handlePageHide = () => {
+        this.flush();
+    };
+
+    #handleVisibilityChange = () => {
+        if (document.visibilityState === 'hidden') {
+            this.flush();
+        }
+    };
+
+    #processEntries(entries) {
+        for (const entry of entries) {
+            const name = entry.name;
+
+            if (this.#seen.has(name) || !this.#resourcePatterns.some((pattern) => pattern.test(name))) {
+                continue;
+            }
+
+            this.#seen.add(name);
+            this.#pending.push(name);
+        }
+
+        while (this.#pending.length >= this.#batchSize) {
+            this.#send(this.#pending.splice(0, this.#batchSize));
+        }
+    }
+
+    #send(uris) {
+        const request = this.#postUris(uris)
+            .catch((error) => {
+                this.#reportError(error);
+            })
+            .finally(() => {
+                this.#inFlight.delete(request);
+            });
+
+        this.#inFlight.add(request);
+    }
+
+    async #postUris(uris) {
+        const body = JSON.stringify({ uris });
+
+        let response = await fetch(await this.#getSignedUrl(), this.#requestInit(body));
+
+        if (!response.ok) {
+            // The cached signed URL may have expired server-side. Refresh once and retry.
+            this.#invalidateSignedUrl();
+            response = await fetch(await this.#getSignedUrl(), this.#requestInit(body));
+        }
+
+        if (!response.ok) {
+            throw new Error(`ResourceCollector: asset check failed with HTTP ${response.status}`);
+        }
+    }
+
+    /**
+     * Returns a signed upload URL, reusing a cached one until it expires.
+     * The in-flight promise is cached too, so concurrent batches share a
+     * single signed URL request instead of each issuing their own.
+     */
+    #getSignedUrl() {
+        if (this.#signedUrlPromise !== null && Date.now() < this.#signedUrlExpiresAt) {
+            return this.#signedUrlPromise;
+        }
+
+        const promise = this.#fetchSignedUrl().catch((error) => {
+            if (this.#signedUrlPromise === promise) {
+                this.#invalidateSignedUrl();
+            }
+            throw error;
+        });
+
+        this.#signedUrlPromise = promise;
+        this.#signedUrlExpiresAt = Date.now() + this.#signedUrlTtlMs;
+
+        return promise;
+    }
+
+    #invalidateSignedUrl() {
+        this.#signedUrlPromise = null;
+        this.#signedUrlExpiresAt = 0;
+    }
+
+    async #fetchSignedUrl() {
+        const response = await fetch(
+            this.#signedUrlEndpoint,
+            this.#requestInit(JSON.stringify({ action: SIGNED_URL_ACTION })),
+        );
+
+        if (!response.ok) {
+            throw new Error(`ResourceCollector: signed URL request failed with HTTP ${response.status}`);
+        }
+
+        const data = await response.json();
+
+        if (typeof data?.signedUrl !== 'string') {
+            throw new Error('ResourceCollector: signed URL response did not include "signedUrl"');
+        }
+
+        return data.signedUrl;
+    }
+
+    #requestInit(body) {
+        return {
+            method: 'POST',
+            keepalive: true,
+            headers: {
+                Accept: 'application/json',
+                Authorization: `Basic ${btoa(`${this.#publicToken}:`)}`,
+                'Content-Type': 'application/json',
+            },
+            body,
+        };
+    }
+
+    #reportError(error) {
+        if (this.#onError === null) {
+            return;
+        }
+
+        try {
+            this.#onError(error);
+        } catch {
+            // Never let a consumer's error handler break the host page.
+        }
+    }
+}
+
+export default ResourceCollector;
