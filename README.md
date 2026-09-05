@@ -75,4 +75,16 @@ npm run build   # emits dist/ (ESM, CommonJS, minified IIFE)
 npm test        # node:test against src/
 ```
 
-Publishing runs build and tests automatically via `prepublishOnly`.
+## Releasing
+
+Releases are published to npm by GitHub Actions whenever a `v*` tag is pushed.
+The workflow authenticates with npm trusted publishing, so no token is stored
+in the repository, and every release carries a provenance attestation.
+
+```sh
+npm version patch   # or minor / major
+git push --follow-tags
+```
+
+The tag must match the version in `package.json`; the workflow fails otherwise.
+Build and tests run via `prepublishOnly` before anything is uploaded.
