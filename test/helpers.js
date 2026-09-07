@@ -2,7 +2,7 @@
  * Installs minimal browser globals so the collector can run under node:test.
  * Returns handles for driving the fake observer and inspecting fetch calls.
  */
-export function installBrowserGlobals({ fetchImpl } = {}) {
+export function installBrowserGlobals({ fetchImpl, location = defaultLocation() } = {}) {
     const previous = {};
     const listeners = { window: new Map(), document: new Map() };
     const observers = [];
@@ -41,14 +41,25 @@ export function installBrowserGlobals({ fetchImpl } = {}) {
 
     const fakeDocument = { ...makeTarget(listeners.document), visibilityState: 'visible' };
 
-    for (const [key, value] of Object.entries({
+    const globals = {
         PerformanceObserver: FakePerformanceObserver,
         fetch: fakeFetch,
         window: makeTarget(listeners.window),
         document: fakeDocument,
-    })) {
+    };
+
+    if (location !== null) {
+        globals.location = location;
+    }
+
+    for (const [key, value] of Object.entries(globals)) {
         previous[key] = globalThis[key];
         globalThis[key] = value;
+    }
+
+    if (location === null) {
+        previous.location = globalThis.location;
+        delete globalThis.location;
     }
 
     return {
@@ -56,6 +67,7 @@ export function installBrowserGlobals({ fetchImpl } = {}) {
         fetchCalls,
         listeners,
         document: fakeDocument,
+        location: globalThis.location,
         restore() {
             for (const [key, value] of Object.entries(previous)) {
                 if (value === undefined) {
@@ -65,6 +77,20 @@ export function installBrowserGlobals({ fetchImpl } = {}) {
                 }
             }
         },
+    };
+}
+
+/**
+ * A fake `location` for a page with a query string and fragment, so tests can
+ * assert both are stripped from the reported page URL.
+ */
+export function defaultLocation({ origin = 'https://shop.example', pathname = '/checkout' } = {}) {
+    return {
+        origin,
+        pathname,
+        search: '?session=secret',
+        hash: '#payment',
+        href: `${origin}${pathname}?session=secret#payment`,
     };
 }
 

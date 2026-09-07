@@ -2,7 +2,7 @@ import { test, describe, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { ResourceCollector } from '../src/index.js';
-import { installBrowserGlobals, jsonResponse, validOptions } from './helpers.js';
+import { defaultLocation, installBrowserGlobals, jsonResponse, validOptions } from './helpers.js';
 
 describe('constructor validation', () => {
     test('requires publicToken', () => {
@@ -67,6 +67,63 @@ describe('collection', () => {
         const uploads = env.fetchCalls.filter((c) => c.url === 'https://upload.example/signed');
         assert.equal(uploads.length, 1);
         assert.deepEqual(uploads[0].body.uris, ['https://cdn.example/app.js', 'https://cdn.example/app.js?v=2']);
+    });
+
+    test('reports the page URL without query string or fragment', async () => {
+        const collector = new ResourceCollector(validOptions).start();
+        env.observers[0].emit(['https://cdn.example/app.js']);
+        await collector.stop();
+
+        const uploads = env.fetchCalls.filter((c) => c.url === 'https://upload.example/signed');
+        assert.equal(uploads.length, 1);
+        assert.deepEqual(uploads[0].body, {
+            pageUrl: 'https://shop.example/checkout',
+            uris: ['https://cdn.example/app.js'],
+        });
+    });
+
+    test('sends one request per page URL when the location changes between entries', async () => {
+        const collector = new ResourceCollector(validOptions).start();
+        env.observers[0].emit(['https://cdn.example/app.js']);
+        Object.assign(globalThis.location, defaultLocation({ pathname: '/checkout/payment' }));
+        env.observers[0].emit(['https://js.stripe.com/v3/stripe.js']);
+        await collector.stop();
+
+        const uploads = env.fetchCalls.filter((c) => c.url === 'https://upload.example/signed');
+        assert.deepEqual(
+            uploads.map((u) => u.body),
+            [
+                { pageUrl: 'https://shop.example/checkout', uris: ['https://cdn.example/app.js'] },
+                { pageUrl: 'https://shop.example/checkout/payment', uris: ['https://js.stripe.com/v3/stripe.js'] },
+            ],
+        );
+    });
+
+    test('reports a URI again when it is seen on another page', async () => {
+        const collector = new ResourceCollector(validOptions).start();
+        env.observers[0].emit(['https://cdn.example/app.js']);
+        env.observers[0].emit(['https://cdn.example/app.js']);
+        Object.assign(globalThis.location, defaultLocation({ pathname: '/cart' }));
+        env.observers[0].emit(['https://cdn.example/app.js']);
+        await collector.stop();
+
+        const uploads = env.fetchCalls.filter((c) => c.url === 'https://upload.example/signed');
+        assert.deepEqual(
+            uploads.map((u) => u.body.pageUrl),
+            ['https://shop.example/checkout', 'https://shop.example/cart'],
+        );
+    });
+
+    test('omits pageUrl when location is unavailable', async () => {
+        env.restore();
+        env = installBrowserGlobals({ location: null });
+
+        const collector = new ResourceCollector(validOptions).start();
+        env.observers[0].emit(['https://cdn.example/app.js']);
+        await collector.stop();
+
+        const uploads = env.fetchCalls.filter((c) => c.url === 'https://upload.example/signed');
+        assert.deepEqual(uploads[0].body, { uris: ['https://cdn.example/app.js'] });
     });
 
     test('honours resourceTypes option', async () => {
