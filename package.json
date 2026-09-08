@@ -37,12 +37,12 @@
     },
     "repository": {
         "type": "git",
-        "url": "git+https://github.com/PageyCorp/assetassure-resource-collector.git"
+        "url": "git+https://github.com/pageycorp/assetassure-resource-collector.git"
     },
     "bugs": {
-        "url": "https://github.com/PageyCorp/assetassure-resource-collector/issues"
+        "url": "https://github.com/pageycorp/assetassure-resource-collector/issues"
     },
-    "homepage": "https://github.com/PageyCorp/assetassure-resource-collector#readme",
+    "homepage": "https://github.com/pageycorp/assetassure-resource-collector#readme",
     "keywords": [
         "assetassure",
         "resource",
