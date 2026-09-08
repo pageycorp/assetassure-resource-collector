@@ -1,6 +1,26 @@
-const RESOURCE_TYPE_PATTERNS = Object.freeze({
-    js: /\.js(\?.*)?(#.*)?$/i,
-    css: /\.css(\?.*)?(#.*)?$/i,
+const PATH_EXTENSION_PATTERNS = Object.freeze({
+    js: /\.m?js$/i,
+    css: /\.css$/i,
+});
+
+/**
+ * One classifier per resource type. Each receives a `PerformanceResourceTiming`
+ * entry and the URL path (no query string or fragment) and returns whether the
+ * entry is a resource of that type.
+ *
+ * Scripts are recognised from `initiatorType === 'script'`, which the browser
+ * sets for every `<script src>` regardless of URL shape, so extension-less
+ * scripts such as `https://js.stripe.com/v3/` are reported. The `.js`/`.mjs`
+ * extension is kept as a fallback for dynamic `import()` and workers, which some
+ * engines report with initiator type `other`.
+ *
+ * Stylesheets are recognised from the `.css` extension only. The `css`
+ * initiator type marks resources loaded *by* a stylesheet (fonts, images), not
+ * the stylesheet itself, so it must not be used here.
+ */
+const RESOURCE_TYPE_CLASSIFIERS = Object.freeze({
+    js: (entry, path) => entry.initiatorType === 'script' || PATH_EXTENSION_PATTERNS.js.test(path),
+    css: (entry, path) => PATH_EXTENSION_PATTERNS.css.test(path),
 });
 
 const API_DOMAIN_PATTERN = /^api\.[a-z0-9.-]+\.assetassure\.io$/i;
@@ -16,9 +36,9 @@ const DEFAULTS = Object.freeze({
 });
 
 /**
- * Observes resources loaded by the current page and reports their URIs to the
- * AssetAssure API in batches, one batch per page URL so the API can record
- * which page loaded which resource.
+ * Observes resources loaded by the current page and reports their URIs and
+ * types to the AssetAssure API in batches, one batch per page URL so the API
+ * can record which page loaded which resource.
  *
  * @example
  * const collector = new ResourceCollector({
@@ -28,11 +48,11 @@ const DEFAULTS = Object.freeze({
  * collector.start();
  */
 export class ResourceCollector {
-    static RESOURCE_TYPES = Object.freeze(Object.keys(RESOURCE_TYPE_PATTERNS));
+    static RESOURCE_TYPES = Object.freeze(Object.keys(RESOURCE_TYPE_CLASSIFIERS));
 
     #publicToken;
     #signedUrlEndpoint;
-    #resourcePatterns;
+    #classifiers;
     #batchSize;
     #flushIntervalMs;
     #signedUrlTtlMs;
@@ -79,7 +99,7 @@ export class ResourceCollector {
             throw new TypeError('ResourceCollector: resourceTypes must be a non-empty array');
         }
 
-        const unknown = resourceTypes.filter((type) => !(type in RESOURCE_TYPE_PATTERNS));
+        const unknown = resourceTypes.filter((type) => !(type in RESOURCE_TYPE_CLASSIFIERS));
         if (unknown.length > 0) {
             throw new TypeError(
                 `ResourceCollector: unknown resourceTypes ${JSON.stringify(unknown)}; expected one of ${JSON.stringify(ResourceCollector.RESOURCE_TYPES)}`,
@@ -100,7 +120,7 @@ export class ResourceCollector {
 
         this.#publicToken = publicToken;
         this.#signedUrlEndpoint = `https://${apiDomain}${SIGNED_URL_PATH}`;
-        this.#resourcePatterns = resourceTypes.map((type) => RESOURCE_TYPE_PATTERNS[type]);
+        this.#classifiers = resourceTypes.map((type) => [type, RESOURCE_TYPE_CLASSIFIERS[type]]);
         this.#batchSize = batchSize;
         this.#flushIntervalMs = flushIntervalMs;
         this.#signedUrlTtlMs = signedUrlTtlMs;
@@ -174,7 +194,7 @@ export class ResourceCollector {
     }
 
     /**
-     * Send any pending URIs immediately.
+     * Send any pending resources immediately.
      *
      * @returns {Promise<void>} Resolves once all in-flight requests have settled.
      */
@@ -203,17 +223,55 @@ export class ResourceCollector {
             const uri = entry.name;
             const seenKey = `${pageUrl}|${uri}`;
 
-            if (this.#seen.has(seenKey) || !this.#resourcePatterns.some((pattern) => pattern.test(uri))) {
+            if (this.#seen.has(seenKey)) {
+                continue;
+            }
+
+            const type = this.#classify(entry);
+
+            if (type === null) {
                 continue;
             }
 
             this.#seen.add(seenKey);
-            this.#pending.push({ uri, pageUrl });
+            this.#pending.push({ uri, type, pageUrl });
         }
 
         while (this.#pending.length >= this.#batchSize) {
             this.#drain(this.#pending.splice(0, this.#batchSize));
         }
+    }
+
+    /**
+     * Returns the configured resource type matching the entry, or `null` when
+     * the entry is not a resource this collector reports.
+     *
+     * @param {PerformanceResourceTiming} entry
+     * @returns {string|null}
+     */
+    #classify(entry) {
+        const path = ResourceCollector.#pathOf(entry.name);
+
+        for (const [type, classifier] of this.#classifiers) {
+            if (classifier(entry, path)) {
+                return type;
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * The URL path without query string or fragment, so `gtm.js?id=X` and
+     * `app.js#hash` are classified by their extension.
+     *
+     * @param {string} uri
+     * @returns {string}
+     */
+    static #pathOf(uri) {
+        const end = uri.search(/[?#]/);
+
+        return end === -1 ? uri : uri.slice(0, end);
     }
 
     /**
@@ -233,25 +291,25 @@ export class ResourceCollector {
     /**
      * Sends the given pending items, one request per page URL.
      *
-     * @param {Array<{uri: string, pageUrl: string|null}>} items
+     * @param {Array<{uri: string, type: string, pageUrl: string|null}>} items
      */
     #drain(items) {
         const groups = new Map();
 
-        for (const { uri, pageUrl } of items) {
+        for (const { uri, type, pageUrl } of items) {
             if (!groups.has(pageUrl)) {
                 groups.set(pageUrl, []);
             }
-            groups.get(pageUrl).push(uri);
+            groups.get(pageUrl).push({ uri, type });
         }
 
-        for (const [pageUrl, uris] of groups) {
-            this.#send(uris, pageUrl);
+        for (const [pageUrl, resources] of groups) {
+            this.#send(resources, pageUrl);
         }
     }
 
-    #send(uris, pageUrl) {
-        const request = this.#postUris(uris, pageUrl)
+    #send(resources, pageUrl) {
+        const request = this.#postResources(resources, pageUrl)
             .catch((error) => {
                 this.#reportError(error);
             })
@@ -262,8 +320,8 @@ export class ResourceCollector {
         this.#inFlight.add(request);
     }
 
-    async #postUris(uris, pageUrl) {
-        const body = JSON.stringify(pageUrl === null ? { uris } : { pageUrl, uris });
+    async #postResources(resources, pageUrl) {
+        const body = JSON.stringify(pageUrl === null ? { resources } : { pageUrl, resources });
 
         let response = await fetch(await this.#getSignedUrl(), this.#requestInit(body));
 

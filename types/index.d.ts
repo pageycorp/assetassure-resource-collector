@@ -1,11 +1,20 @@
 export type ResourceType = 'js' | 'css';
 
+/** One item of the `resources` array posted to the API. */
+export interface ReportedResource {
+    uri: string;
+    type: ResourceType;
+}
+
 export interface ResourceCollectorOptions {
     /** Public API token. */
     publicToken: string;
     /** Must match `api.<subdomain>.assetassure.io`. */
     apiDomain: string;
-    /** Resource kinds to report. Defaults to `['js']`. */
+    /**
+     * Resource kinds to report. Defaults to `['js']`.
+     * `js` matches `initiatorType === 'script'` or a `.js`/`.mjs` path; `css` matches a `.css` path.
+     */
     resourceTypes?: ResourceType[];
     /** URIs per request. Defaults to 50. */
     batchSize?: number;
@@ -31,7 +40,7 @@ export declare class ResourceCollector {
     /** Stop observing and flush anything still pending. */
     stop(): Promise<void>;
 
-    /** Send any pending URIs immediately, one request per page URL. */
+    /** Send any pending resources immediately, one request per page URL. */
     flush(): Promise<void>;
 }
 
