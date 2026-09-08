@@ -1,7 +1,8 @@
 # assetassure-resource-collector
 
 Browser library that observes JS and CSS resources loaded by a page and reports
-their URIs to the AssetAssure API in batches.
+their URIs, together with the URL of the page that loaded them, to the
+AssetAssure API in batches.
 
 ## Install
 
@@ -60,7 +61,13 @@ const { ResourceCollector } = require('assetassure-resource-collector');
 
 ### Behaviour
 
-- Only resources not seen before on the page are reported.
+- Each batch is posted as `{ "pageUrl": "<origin + pathname>", "uris": [...] }`.
+    The page URL is captured when the resource is observed, so single-page
+    applications get one batch per route. Query string and fragment are
+    stripped in the browser so session identifiers never leave the page.
+    `pageUrl` is omitted when `location` is unavailable.
+- Only resources not seen before on the current page URL are reported. The
+    same resource is reported again when it is seen on another page.
 - Pending URIs are sent when a full batch accumulates, on the flush interval,
     when the page is hidden, on `pagehide`, and on `stop()`.
 - A rejected upload triggers one signed URL refresh and retry before the error

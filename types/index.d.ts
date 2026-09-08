@@ -31,7 +31,7 @@ export declare class ResourceCollector {
     /** Stop observing and flush anything still pending. */
     stop(): Promise<void>;
 
-    /** Send any pending URIs immediately. */
+    /** Send any pending URIs immediately, one request per page URL. */
     flush(): Promise<void>;
 }
 

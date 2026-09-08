@@ -17,7 +17,8 @@ const DEFAULTS = Object.freeze({
 
 /**
  * Observes resources loaded by the current page and reports their URIs to the
- * AssetAssure API in batches.
+ * AssetAssure API in batches, one batch per page URL so the API can record
+ * which page loaded which resource.
  *
  * @example
  * const collector = new ResourceCollector({
@@ -179,7 +180,7 @@ export class ResourceCollector {
      */
     flush() {
         if (this.#pending.length > 0) {
-            this.#send(this.#pending.splice(0, this.#pending.length));
+            this.#drain(this.#pending.splice(0, this.#pending.length));
         }
 
         return Promise.allSettled(this.#inFlight).then(() => undefined);
@@ -196,24 +197,61 @@ export class ResourceCollector {
     };
 
     #processEntries(entries) {
-        for (const entry of entries) {
-            const name = entry.name;
+        const pageUrl = this.#currentPageUrl();
 
-            if (this.#seen.has(name) || !this.#resourcePatterns.some((pattern) => pattern.test(name))) {
+        for (const entry of entries) {
+            const uri = entry.name;
+            const seenKey = `${pageUrl}|${uri}`;
+
+            if (this.#seen.has(seenKey) || !this.#resourcePatterns.some((pattern) => pattern.test(uri))) {
                 continue;
             }
 
-            this.#seen.add(name);
-            this.#pending.push(name);
+            this.#seen.add(seenKey);
+            this.#pending.push({ uri, pageUrl });
         }
 
         while (this.#pending.length >= this.#batchSize) {
-            this.#send(this.#pending.splice(0, this.#batchSize));
+            this.#drain(this.#pending.splice(0, this.#batchSize));
         }
     }
 
-    #send(uris) {
-        const request = this.#postUris(uris)
+    /**
+     * The page currently loading resources, without query string or fragment so
+     * that session identifiers or tokens never leave the browser.
+     *
+     * @returns {string|null}
+     */
+    #currentPageUrl() {
+        if (typeof location === 'undefined' || typeof location.origin !== 'string' || typeof location.pathname !== 'string') {
+            return null;
+        }
+
+        return `${location.origin}${location.pathname}`;
+    }
+
+    /**
+     * Sends the given pending items, one request per page URL.
+     *
+     * @param {Array<{uri: string, pageUrl: string|null}>} items
+     */
+    #drain(items) {
+        const groups = new Map();
+
+        for (const { uri, pageUrl } of items) {
+            if (!groups.has(pageUrl)) {
+                groups.set(pageUrl, []);
+            }
+            groups.get(pageUrl).push(uri);
+        }
+
+        for (const [pageUrl, uris] of groups) {
+            this.#send(uris, pageUrl);
+        }
+    }
+
+    #send(uris, pageUrl) {
+        const request = this.#postUris(uris, pageUrl)
             .catch((error) => {
                 this.#reportError(error);
             })
@@ -224,8 +262,8 @@ export class ResourceCollector {
         this.#inFlight.add(request);
     }
 
-    async #postUris(uris) {
-        const body = JSON.stringify({ uris });
+    async #postUris(uris, pageUrl) {
+        const body = JSON.stringify(pageUrl === null ? { uris } : { pageUrl, uris });
 
         let response = await fetch(await this.#getSignedUrl(), this.#requestInit(body));
 
