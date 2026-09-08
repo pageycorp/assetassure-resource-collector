@@ -2,7 +2,7 @@ import { test, describe, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { ResourceCollector } from '../src/index.js';
-import { defaultLocation, installBrowserGlobals, jsonResponse, validOptions } from './helpers.js';
+import { defaultLocation, installBrowserGlobals, jsonResponse, urisOf, validOptions } from './helpers.js';
 
 describe('constructor validation', () => {
     test('requires publicToken', () => {
@@ -66,7 +66,54 @@ describe('collection', () => {
 
         const uploads = env.fetchCalls.filter((c) => c.url === 'https://upload.example/signed');
         assert.equal(uploads.length, 1);
-        assert.deepEqual(uploads[0].body.uris, ['https://cdn.example/app.js', 'https://cdn.example/app.js?v=2']);
+        assert.deepEqual(urisOf(uploads[0]), ['https://cdn.example/app.js', 'https://cdn.example/app.js?v=2']);
+    });
+
+    test('classifies scripts by initiator type, not by extension', async () => {
+        const collector = new ResourceCollector({ ...validOptions, resourceTypes: ['js', 'css'] }).start();
+        env.observers[0].emit([
+            { name: 'https://js.stripe.com/v3/', initiatorType: 'script' },
+            { name: 'https://www.googletagmanager.com/gtag/js?id=G-1', initiatorType: 'script' },
+            { name: 'https://cdn.example/chunk.mjs', initiatorType: 'other' },
+            { name: 'https://cdn.example/legacy.JS?v=1#x', initiatorType: 'other' },
+            { name: 'https://cdn.example/style.css', initiatorType: 'link' },
+            { name: 'https://cdn.example/api/data', initiatorType: 'fetch' },
+            { name: 'https://cdn.example/api/data.json?callback=js', initiatorType: 'xmlhttprequest' },
+            { name: 'https://cdn.example/font.woff2', initiatorType: 'css' },
+            { name: 'https://cdn.example/hero.png', initiatorType: 'img' },
+            { name: 'https://cdn.example/frame', initiatorType: 'iframe' },
+        ]);
+        await collector.stop();
+
+        const uploads = env.fetchCalls.filter((c) => c.url === 'https://upload.example/signed');
+        assert.equal(uploads.length, 1);
+        assert.deepEqual(uploads[0].body.resources, [
+            { uri: 'https://js.stripe.com/v3/', type: 'js' },
+            { uri: 'https://www.googletagmanager.com/gtag/js?id=G-1', type: 'js' },
+            { uri: 'https://cdn.example/chunk.mjs', type: 'js' },
+            { uri: 'https://cdn.example/legacy.JS?v=1#x', type: 'js' },
+            { uri: 'https://cdn.example/style.css', type: 'css' },
+        ]);
+    });
+
+    test('does not report a stylesheet as a script when only js is configured', async () => {
+        const collector = new ResourceCollector(validOptions).start();
+        env.observers[0].emit([
+            { name: 'https://cdn.example/style.css', initiatorType: 'link' },
+            { name: 'https://cdn.example/theme', initiatorType: 'link' },
+        ]);
+        await collector.stop();
+
+        assert.equal(env.fetchCalls.length, 0);
+    });
+
+    test('tolerates entries without an initiator type', async () => {
+        const collector = new ResourceCollector(validOptions).start();
+        env.observers[0].emit([{ name: 'https://cdn.example/app.js' }, { name: 'https://cdn.example/app' }]);
+        await collector.stop();
+
+        const uploads = env.fetchCalls.filter((c) => c.url === 'https://upload.example/signed');
+        assert.deepEqual(urisOf(uploads[0]), ['https://cdn.example/app.js']);
     });
 
     test('reports the page URL without query string or fragment', async () => {
@@ -78,7 +125,7 @@ describe('collection', () => {
         assert.equal(uploads.length, 1);
         assert.deepEqual(uploads[0].body, {
             pageUrl: 'https://shop.example/checkout',
-            uris: ['https://cdn.example/app.js'],
+            resources: [{ uri: 'https://cdn.example/app.js', type: 'js' }],
         });
     });
 
@@ -86,15 +133,21 @@ describe('collection', () => {
         const collector = new ResourceCollector(validOptions).start();
         env.observers[0].emit(['https://cdn.example/app.js']);
         Object.assign(globalThis.location, defaultLocation({ pathname: '/checkout/payment' }));
-        env.observers[0].emit(['https://js.stripe.com/v3/stripe.js']);
+        env.observers[0].emit([{ name: 'https://js.stripe.com/v3/', initiatorType: 'script' }]);
         await collector.stop();
 
         const uploads = env.fetchCalls.filter((c) => c.url === 'https://upload.example/signed');
         assert.deepEqual(
             uploads.map((u) => u.body),
             [
-                { pageUrl: 'https://shop.example/checkout', uris: ['https://cdn.example/app.js'] },
-                { pageUrl: 'https://shop.example/checkout/payment', uris: ['https://js.stripe.com/v3/stripe.js'] },
+                {
+                    pageUrl: 'https://shop.example/checkout',
+                    resources: [{ uri: 'https://cdn.example/app.js', type: 'js' }],
+                },
+                {
+                    pageUrl: 'https://shop.example/checkout/payment',
+                    resources: [{ uri: 'https://js.stripe.com/v3/', type: 'js' }],
+                },
             ],
         );
     });
@@ -123,7 +176,7 @@ describe('collection', () => {
         await collector.stop();
 
         const uploads = env.fetchCalls.filter((c) => c.url === 'https://upload.example/signed');
-        assert.deepEqual(uploads[0].body, { uris: ['https://cdn.example/app.js'] });
+        assert.deepEqual(uploads[0].body, { resources: [{ uri: 'https://cdn.example/app.js', type: 'js' }] });
     });
 
     test('reports its own pinned CDN script so it appears in the inventory', async () => {
@@ -134,7 +187,7 @@ describe('collection', () => {
         await collector.stop();
 
         const uploads = env.fetchCalls.filter((c) => c.url === 'https://upload.example/signed');
-        assert.deepEqual(uploads[0].body.uris, [ownScript, 'https://cdn.example/app.js']);
+        assert.deepEqual(urisOf(uploads[0]), [ownScript, 'https://cdn.example/app.js']);
     });
 
     test('honours resourceTypes option', async () => {
@@ -143,7 +196,7 @@ describe('collection', () => {
         await collector.stop();
 
         const uploads = env.fetchCalls.filter((c) => c.url === 'https://upload.example/signed');
-        assert.deepEqual(uploads[0].body.uris, ['https://cdn.example/style.css']);
+        assert.deepEqual(urisOf(uploads[0]), ['https://cdn.example/style.css']);
     });
 
     test('sends full batches eagerly and reuses the signed URL', async () => {
@@ -155,7 +208,7 @@ describe('collection', () => {
         const uploads = env.fetchCalls.filter((c) => c.url === 'https://upload.example/signed');
         assert.equal(signed.length, 1, 'signed URL fetched once and cached');
         assert.equal(uploads.length, 3);
-        assert.deepEqual(uploads.map((u) => u.body.uris.length), [2, 2, 1]);
+        assert.deepEqual(uploads.map((u) => urisOf(u).length), [2, 2, 1]);
     });
 
     test('requests a fresh signed URL once the TTL has elapsed', async () => {
@@ -211,7 +264,7 @@ describe('collection', () => {
         await collector.stop();
         const uploads = env.fetchCalls.filter((c) => c.url === 'https://upload.example/signed');
         assert.equal(uploads.length, 1);
-        assert.deepEqual(uploads[0].body.uris, ['https://a/1.js', 'https://a/2.js']);
+        assert.deepEqual(urisOf(uploads[0]), ['https://a/1.js', 'https://a/2.js']);
     });
 
     test('flushes on pagehide', async () => {

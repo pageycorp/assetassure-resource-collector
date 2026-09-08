@@ -1,8 +1,8 @@
 # assetassure-resource-collector
 
 Browser library that observes JS and CSS resources loaded by a page and reports
-their URIs, together with the URL of the page that loaded them, to the
-AssetAssure API in batches.
+their URIs and types, together with the URL of the page that loaded them, to
+the AssetAssure API in batches.
 
 ## Install
 
@@ -53,7 +53,7 @@ const { ResourceCollector } = require('assetassure-resource-collector');
 | ----------------- | -------- | --------- | --------------------------------------------------------------------------- |
 | `publicToken`     | yes      |           | Public token used for Basic auth against the AssetAssure API.               |
 | `apiDomain`       | yes      |           | Must match `api.<subdomain>.assetassure.io`.                                |
-| `resourceTypes`   | no       | `['js']`  | Any of `'js'`, `'css'`.                                                     |
+| `resourceTypes`   | no       | `['js']`  | Any of `'js'`, `'css'`. See [Classification](#classification).              |
 | `batchSize`       | no       | `50`      | URIs per request. Keep bodies small: keepalive requests are capped at 64 KB. |
 | `flushIntervalMs` | no       | `2000`    | Periodic flush interval. `0` disables the timer.                            |
 | `signedUrlTtlMs`  | no       | `60000`   | How long a signed URL is reused before a fresh one is requested.            |
@@ -61,7 +61,8 @@ const { ResourceCollector } = require('assetassure-resource-collector');
 
 ### Behaviour
 
-- Each batch is posted as `{ "pageUrl": "<origin + pathname>", "uris": [...] }`.
+- Each batch is posted as
+    `{ "pageUrl": "<origin + pathname>", "resources": [{ "uri": "...", "type": "js" | "css" }, ...] }`.
     The page URL is captured when the resource is observed, so single-page
     applications get one batch per route. Query string and fragment are
     stripped in the browser so session identifiers never leave the page.
@@ -73,6 +74,20 @@ const { ResourceCollector } = require('assetassure-resource-collector');
 - A rejected upload triggers one signed URL refresh and retry before the error
     is reported.
 - `start()` is a no-op where `PerformanceObserver` is unavailable.
+
+### Classification
+
+Resources are classified from what the browser knows about them, not from the
+URL alone, so scripts without a `.js` extension are reported too.
+
+| Type  | Reported when                                                                                          |
+| ----- | ------------------------------------------------------------------------------------------------------ |
+| `js`  | `PerformanceResourceTiming.initiatorType` is `script` (any `<script src>`, for example `https://js.stripe.com/v3/`), or the URL path ends in `.js` / `.mjs` (dynamic `import()`, workers). |
+| `css` | The URL path ends in `.css`. The `css` initiator type is deliberately not used: it marks fonts and images loaded *by* a stylesheet. |
+
+Query string and fragment are ignored when checking the extension, so
+`gtm.js?id=X` is a script. Fetch/XHR responses, images, fonts and iframes are
+never reported.
 
 ## Development
 

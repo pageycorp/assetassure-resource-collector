@@ -29,8 +29,15 @@ export function installBrowserGlobals({ fetchImpl, location = defaultLocation() 
         disconnect() {
             this.disconnected = true;
         }
-        emit(names) {
-            this.callback({ getEntries: () => names.map((name) => ({ name })) });
+        /**
+         * Emits resource timing entries. Each item is either a URL string or a
+         * `{ name, initiatorType }` object. Strings ending in `.js` default to
+         * initiator type `script` and `.css` to `link`, matching what a browser
+         * reports for `<script src>` and `<link rel="stylesheet">`; anything else
+         * defaults to `other`.
+         */
+        emit(items) {
+            this.callback({ getEntries: () => items.map(toEntry) });
         }
     }
 
@@ -78,6 +85,24 @@ export function installBrowserGlobals({ fetchImpl, location = defaultLocation() 
             }
         },
     };
+}
+
+function toEntry(item) {
+    if (typeof item !== 'string') {
+        return item;
+    }
+
+    const path = item.split(/[?#]/)[0];
+    const initiatorType = /\.js$/i.test(path) ? 'script' : /\.css$/i.test(path) ? 'link' : 'other';
+
+    return { name: item, initiatorType };
+}
+
+/**
+ * Returns the URIs posted in an upload, in order.
+ */
+export function urisOf(upload) {
+    return upload.body.resources.map((resource) => resource.uri);
 }
 
 /**
