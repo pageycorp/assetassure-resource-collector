@@ -126,6 +126,17 @@ describe('collection', () => {
         assert.deepEqual(uploads[0].body, { uris: ['https://cdn.example/app.js'] });
     });
 
+    test('reports its own pinned CDN script so it appears in the inventory', async () => {
+        const ownScript =
+            'https://cdn.jsdelivr.net/npm/assetassure-resource-collector@0.2.0/dist/assetassure-resource-collector.min.js';
+        const collector = new ResourceCollector(validOptions).start();
+        env.observers[0].emit([ownScript, 'https://cdn.example/app.js']);
+        await collector.stop();
+
+        const uploads = env.fetchCalls.filter((c) => c.url === 'https://upload.example/signed');
+        assert.deepEqual(uploads[0].body.uris, [ownScript, 'https://cdn.example/app.js']);
+    });
+
     test('honours resourceTypes option', async () => {
         const collector = new ResourceCollector({ ...validOptions, resourceTypes: ['css'] }).start();
         env.observers[0].emit(['https://cdn.example/app.js', 'https://cdn.example/style.css']);
