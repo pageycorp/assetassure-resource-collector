@@ -1,6 +1,6 @@
 {
     "name": "assetassure-resource-collector",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "description": "Browser library that observes loaded JS/CSS resources and reports them to the AssetAssure API",
     "license": "MIT",
     "author": "natepage",
