@@ -20,8 +20,6 @@ export interface ResourceCollectorOptions {
     batchSize?: number;
     /** Periodic flush interval in milliseconds. `0` disables the timer. Defaults to 2000. */
     flushIntervalMs?: number;
-    /** How long a signed URL is reused before a fresh one is requested. Defaults to 60000. */
-    signedUrlTtlMs?: number;
     /** Called when a request fails. Errors are otherwise swallowed. */
     onError?: (error: Error) => void;
 }
