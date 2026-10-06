@@ -2,7 +2,7 @@ import { test, describe, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { ResourceCollector } from '../src/index.js';
-import { defaultLocation, installBrowserGlobals, jsonResponse, urisOf, validOptions } from './helpers.js';
+import { CHECK_ASSETS_URL, defaultLocation, installBrowserGlobals, jsonResponse, urisOf, validOptions } from './helpers.js';
 
 describe('constructor validation', () => {
     test('requires publicToken', () => {
@@ -64,7 +64,7 @@ describe('collection', () => {
         ]);
         await collector.stop();
 
-        const uploads = env.fetchCalls.filter((c) => c.url === 'https://upload.example/signed');
+        const uploads = env.fetchCalls.filter((c) => c.url === CHECK_ASSETS_URL);
         assert.equal(uploads.length, 1);
         assert.deepEqual(urisOf(uploads[0]), ['https://cdn.example/app.js', 'https://cdn.example/app.js?v=2']);
     });
@@ -85,7 +85,7 @@ describe('collection', () => {
         ]);
         await collector.stop();
 
-        const uploads = env.fetchCalls.filter((c) => c.url === 'https://upload.example/signed');
+        const uploads = env.fetchCalls.filter((c) => c.url === CHECK_ASSETS_URL);
         assert.equal(uploads.length, 1);
         assert.deepEqual(uploads[0].body.resources, [
             { uri: 'https://js.stripe.com/v3/', type: 'js' },
@@ -112,7 +112,7 @@ describe('collection', () => {
         env.observers[0].emit([{ name: 'https://cdn.example/app.js' }, { name: 'https://cdn.example/app' }]);
         await collector.stop();
 
-        const uploads = env.fetchCalls.filter((c) => c.url === 'https://upload.example/signed');
+        const uploads = env.fetchCalls.filter((c) => c.url === CHECK_ASSETS_URL);
         assert.deepEqual(urisOf(uploads[0]), ['https://cdn.example/app.js']);
     });
 
@@ -121,7 +121,7 @@ describe('collection', () => {
         env.observers[0].emit(['https://cdn.example/app.js']);
         await collector.stop();
 
-        const uploads = env.fetchCalls.filter((c) => c.url === 'https://upload.example/signed');
+        const uploads = env.fetchCalls.filter((c) => c.url === CHECK_ASSETS_URL);
         assert.equal(uploads.length, 1);
         assert.deepEqual(uploads[0].body, {
             pageUrl: 'https://shop.example/checkout',
@@ -136,7 +136,7 @@ describe('collection', () => {
         env.observers[0].emit([{ name: 'https://js.stripe.com/v3/', initiatorType: 'script' }]);
         await collector.stop();
 
-        const uploads = env.fetchCalls.filter((c) => c.url === 'https://upload.example/signed');
+        const uploads = env.fetchCalls.filter((c) => c.url === CHECK_ASSETS_URL);
         assert.deepEqual(
             uploads.map((u) => u.body),
             [
@@ -160,7 +160,7 @@ describe('collection', () => {
         env.observers[0].emit(['https://cdn.example/app.js']);
         await collector.stop();
 
-        const uploads = env.fetchCalls.filter((c) => c.url === 'https://upload.example/signed');
+        const uploads = env.fetchCalls.filter((c) => c.url === CHECK_ASSETS_URL);
         assert.deepEqual(
             uploads.map((u) => u.body.pageUrl),
             ['https://shop.example/checkout', 'https://shop.example/cart'],
@@ -175,18 +175,18 @@ describe('collection', () => {
         env.observers[0].emit(['https://cdn.example/app.js']);
         await collector.stop();
 
-        const uploads = env.fetchCalls.filter((c) => c.url === 'https://upload.example/signed');
+        const uploads = env.fetchCalls.filter((c) => c.url === CHECK_ASSETS_URL);
         assert.deepEqual(uploads[0].body, { resources: [{ uri: 'https://cdn.example/app.js', type: 'js' }] });
     });
 
     test('reports its own pinned CDN script so it appears in the inventory', async () => {
         const ownScript =
-            'https://cdn.jsdelivr.net/npm/assetassure-resource-collector@0.2.0/dist/assetassure-resource-collector.min.js';
+            'https://cdn.jsdelivr.net/npm/assetassure-resource-collector@0.4.0/dist/assetassure-resource-collector.min.js';
         const collector = new ResourceCollector(validOptions).start();
         env.observers[0].emit([ownScript, 'https://cdn.example/app.js']);
         await collector.stop();
 
-        const uploads = env.fetchCalls.filter((c) => c.url === 'https://upload.example/signed');
+        const uploads = env.fetchCalls.filter((c) => c.url === CHECK_ASSETS_URL);
         assert.deepEqual(urisOf(uploads[0]), [ownScript, 'https://cdn.example/app.js']);
     });
 
@@ -195,31 +195,19 @@ describe('collection', () => {
         env.observers[0].emit(['https://cdn.example/app.js', 'https://cdn.example/style.css']);
         await collector.stop();
 
-        const uploads = env.fetchCalls.filter((c) => c.url === 'https://upload.example/signed');
+        const uploads = env.fetchCalls.filter((c) => c.url === CHECK_ASSETS_URL);
         assert.deepEqual(urisOf(uploads[0]), ['https://cdn.example/style.css']);
     });
 
-    test('sends full batches eagerly and reuses the signed URL', async () => {
+    test('sends full batches eagerly, each straight to /check-assets', async () => {
         const collector = new ResourceCollector({ ...validOptions, batchSize: 2 }).start();
         env.observers[0].emit(['https://a/1.js', 'https://a/2.js', 'https://a/3.js', 'https://a/4.js', 'https://a/5.js']);
         await collector.flush();
 
-        const signed = env.fetchCalls.filter((c) => c.url.endsWith('/signed-url'));
-        const uploads = env.fetchCalls.filter((c) => c.url === 'https://upload.example/signed');
-        assert.equal(signed.length, 1, 'signed URL fetched once and cached');
+        assert.equal(env.fetchCalls.length, 3, 'no request other than the uploads');
+        const uploads = env.fetchCalls.filter((c) => c.url === CHECK_ASSETS_URL);
         assert.equal(uploads.length, 3);
         assert.deepEqual(uploads.map((u) => urisOf(u).length), [2, 2, 1]);
-    });
-
-    test('requests a fresh signed URL once the TTL has elapsed', async () => {
-        const collector = new ResourceCollector({ ...validOptions, signedUrlTtlMs: 0 }).start();
-        env.observers[0].emit(['https://a/1.js']);
-        await collector.flush();
-        env.observers[0].emit(['https://a/2.js']);
-        await collector.flush();
-        await collector.stop();
-
-        assert.equal(env.fetchCalls.filter((c) => c.url.endsWith('/signed-url')).length, 2);
     });
 
     test('sends Basic auth built from the public token', async () => {
@@ -245,7 +233,7 @@ describe('collection', () => {
         assert.equal(env.observers[0].disconnected, true);
         assert.equal(env.listeners.window.size, 0);
         assert.equal(env.listeners.document.size, 0);
-        assert.equal(env.fetchCalls.filter((c) => c.url === 'https://upload.example/signed').length, 1);
+        assert.equal(env.fetchCalls.filter((c) => c.url === CHECK_ASSETS_URL).length, 1);
     });
 
     test('flushes on visibilitychange only when hidden', async () => {
@@ -259,10 +247,10 @@ describe('collection', () => {
         env.observers[0].emit(['https://a/2.js']);
         env.document.visibilityState = 'hidden';
         env.listeners.document.get('visibilitychange')();
-        assert.equal(env.fetchCalls.length, 1, 'signed URL requested as soon as the page is hidden');
+        assert.equal(env.fetchCalls.length, 1, 'batch posted as soon as the page is hidden');
 
         await collector.stop();
-        const uploads = env.fetchCalls.filter((c) => c.url === 'https://upload.example/signed');
+        const uploads = env.fetchCalls.filter((c) => c.url === CHECK_ASSETS_URL);
         assert.equal(uploads.length, 1);
         assert.deepEqual(urisOf(uploads[0]), ['https://a/1.js', 'https://a/2.js']);
     });
@@ -272,7 +260,7 @@ describe('collection', () => {
         env.observers[0].emit(['https://a/1.js']);
         env.listeners.window.get('pagehide')();
         await collector.flush();
-        assert.equal(env.fetchCalls.filter((c) => c.url === 'https://upload.example/signed').length, 1);
+        assert.equal(env.fetchCalls.filter((c) => c.url === CHECK_ASSETS_URL).length, 1);
     });
 });
 
@@ -283,15 +271,12 @@ describe('error handling', () => {
         env?.restore();
     });
 
-    test('refreshes the signed URL once when the upload is rejected', async () => {
+    test('reports a rejected page (403) through onError without retrying', async () => {
         let uploadAttempts = 0;
         env = installBrowserGlobals({
-            fetchImpl: (url) => {
-                if (url.endsWith('/signed-url')) {
-                    return jsonResponse({ signedUrl: 'https://upload.example/signed' });
-                }
+            fetchImpl: () => {
                 uploadAttempts += 1;
-                return jsonResponse({}, uploadAttempts === 1 ? 403 : 200);
+                return jsonResponse({ message: 'Page URL is not an allowed payment page domain.' }, 403);
             },
         });
         const errors = [];
@@ -299,18 +284,13 @@ describe('error handling', () => {
         env.observers[0].emit(['https://a/1.js']);
         await collector.stop();
 
-        assert.equal(uploadAttempts, 2);
-        assert.equal(env.fetchCalls.filter((c) => c.url.endsWith('/signed-url')).length, 2);
-        assert.equal(errors.length, 0);
+        assert.equal(uploadAttempts, 1);
+        assert.equal(errors.length, 1);
+        assert.match(errors[0].message, /HTTP 403/);
     });
 
     test('reports upload failures through onError', async () => {
-        env = installBrowserGlobals({
-            fetchImpl: (url) =>
-                url.endsWith('/signed-url')
-                    ? jsonResponse({ signedUrl: 'https://upload.example/signed' })
-                    : jsonResponse({}, 500),
-        });
+        env = installBrowserGlobals({ fetchImpl: () => jsonResponse({}, 500) });
         const errors = [];
         const collector = new ResourceCollector({ ...validOptions, onError: (e) => errors.push(e) }).start();
         env.observers[0].emit(['https://a/1.js']);
@@ -318,17 +298,6 @@ describe('error handling', () => {
 
         assert.equal(errors.length, 1);
         assert.match(errors[0].message, /HTTP 500/);
-    });
-
-    test('reports a malformed signed URL response', async () => {
-        env = installBrowserGlobals({ fetchImpl: () => jsonResponse({ nope: true }) });
-        const errors = [];
-        const collector = new ResourceCollector({ ...validOptions, onError: (e) => errors.push(e) }).start();
-        env.observers[0].emit(['https://a/1.js']);
-        await collector.stop();
-
-        assert.equal(errors.length, 1);
-        assert.match(errors[0].message, /signedUrl/);
     });
 
     test('swallows errors silently when no onError is given', async () => {
