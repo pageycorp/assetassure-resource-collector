@@ -24,21 +24,21 @@ const RESOURCE_TYPE_CLASSIFIERS = Object.freeze({
 });
 
 const API_DOMAIN_PATTERN = /^api\.[a-z0-9.-]+\.assetassure\.io$/i;
-const SIGNED_URL_ACTION = 'asset_check';
-const SIGNED_URL_PATH = '/signed-url';
+const CHECK_ASSETS_PATH = '/check-assets';
 
 const DEFAULTS = Object.freeze({
     resourceTypes: ['js'],
     batchSize: 50,
     flushIntervalMs: 2000,
-    signedUrlTtlMs: 60_000,
     onError: null,
 });
 
 /**
  * Observes resources loaded by the current page and reports their URIs and
  * types to the AssetAssure API in batches, one batch per page URL so the API
- * can record which page loaded which resource.
+ * can record which page loaded which resource. The page must be served from
+ * one of the payment page domains configured for the tenancy: the API refuses
+ * any other page.
  *
  * @example
  * const collector = new ResourceCollector({
@@ -51,19 +51,16 @@ export class ResourceCollector {
     static RESOURCE_TYPES = Object.freeze(Object.keys(RESOURCE_TYPE_CLASSIFIERS));
 
     #publicToken;
-    #signedUrlEndpoint;
+    #checkAssetsEndpoint;
     #classifiers;
     #batchSize;
     #flushIntervalMs;
-    #signedUrlTtlMs;
     #onError;
 
     #seen = new Set();
     #pending = [];
     #observer = null;
     #intervalId = null;
-    #signedUrlPromise = null;
-    #signedUrlExpiresAt = 0;
     #inFlight = new Set();
 
     /**
@@ -73,7 +70,6 @@ export class ResourceCollector {
      * @param {Array<'js'|'css'>} [options.resourceTypes=['js']]
      * @param {number} [options.batchSize=50]
      * @param {number} [options.flushIntervalMs=2000]
-     * @param {number} [options.signedUrlTtlMs=60000]  How long a signed URL is reused before a fresh one is requested.
      * @param {(error: Error) => void} [options.onError]  Called when a request fails. Errors are otherwise swallowed.
      */
     constructor(options = {}) {
@@ -83,7 +79,6 @@ export class ResourceCollector {
             resourceTypes = DEFAULTS.resourceTypes,
             batchSize = DEFAULTS.batchSize,
             flushIntervalMs = DEFAULTS.flushIntervalMs,
-            signedUrlTtlMs = DEFAULTS.signedUrlTtlMs,
             onError = DEFAULTS.onError,
         } = options;
 
@@ -119,11 +114,10 @@ export class ResourceCollector {
         }
 
         this.#publicToken = publicToken;
-        this.#signedUrlEndpoint = `https://${apiDomain}${SIGNED_URL_PATH}`;
+        this.#checkAssetsEndpoint = `https://${apiDomain}${CHECK_ASSETS_PATH}`;
         this.#classifiers = resourceTypes.map((type) => [type, RESOURCE_TYPE_CLASSIFIERS[type]]);
         this.#batchSize = batchSize;
         this.#flushIntervalMs = flushIntervalMs;
-        this.#signedUrlTtlMs = signedUrlTtlMs;
         this.#onError = onError;
     }
 
@@ -320,67 +314,17 @@ export class ResourceCollector {
         this.#inFlight.add(request);
     }
 
+    /**
+     * One POST straight to /check-assets: the public token in the Authorization
+     * header is the only credential, there is no signed URL round trip.
+     */
     async #postResources(resources, pageUrl) {
         const body = JSON.stringify(pageUrl === null ? { resources } : { pageUrl, resources });
-
-        let response = await fetch(await this.#getSignedUrl(), this.#requestInit(body));
-
-        if (!response.ok) {
-            // The cached signed URL may have expired server-side. Refresh once and retry.
-            this.#invalidateSignedUrl();
-            response = await fetch(await this.#getSignedUrl(), this.#requestInit(body));
-        }
+        const response = await fetch(this.#checkAssetsEndpoint, this.#requestInit(body));
 
         if (!response.ok) {
             throw new Error(`ResourceCollector: asset check failed with HTTP ${response.status}`);
         }
-    }
-
-    /**
-     * Returns a signed upload URL, reusing a cached one until it expires.
-     * The in-flight promise is cached too, so concurrent batches share a
-     * single signed URL request instead of each issuing their own.
-     */
-    #getSignedUrl() {
-        if (this.#signedUrlPromise !== null && Date.now() < this.#signedUrlExpiresAt) {
-            return this.#signedUrlPromise;
-        }
-
-        const promise = this.#fetchSignedUrl().catch((error) => {
-            if (this.#signedUrlPromise === promise) {
-                this.#invalidateSignedUrl();
-            }
-            throw error;
-        });
-
-        this.#signedUrlPromise = promise;
-        this.#signedUrlExpiresAt = Date.now() + this.#signedUrlTtlMs;
-
-        return promise;
-    }
-
-    #invalidateSignedUrl() {
-        this.#signedUrlPromise = null;
-        this.#signedUrlExpiresAt = 0;
-    }
-
-    async #fetchSignedUrl() {
-        const response = await fetch(
-            this.#signedUrlEndpoint,
-            this.#requestInit(JSON.stringify({ action: SIGNED_URL_ACTION })),
-        );
-
-        if (!response.ok) {
-            throw new Error(`ResourceCollector: signed URL request failed with HTTP ${response.status}`);
-        }
-
-        const data = await response.json();
-
-        if (typeof data?.signedUrl !== 'string') {
-            throw new Error('ResourceCollector: signed URL response did not include "signedUrl"');
-        }
-
-        return data.signedUrl;
     }
 
     #requestInit(body) {

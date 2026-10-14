@@ -13,10 +13,7 @@ export function installBrowserGlobals({ fetchImpl, location = defaultLocation() 
         if (fetchImpl) {
             return fetchImpl(url, init, fetchCalls.length);
         }
-        if (url.endsWith('/signed-url')) {
-            return jsonResponse({ signedUrl: 'https://upload.example/signed' });
-        }
-        return jsonResponse({});
+        return jsonResponse({ status: 'ok' });
     };
 
     class FakePerformanceObserver {
@@ -125,6 +122,9 @@ export function jsonResponse(body, status = 200) {
         headers: { 'Content-Type': 'application/json' },
     });
 }
+
+/** Where every batch is posted for `validOptions`. */
+export const CHECK_ASSETS_URL = 'https://api.acme.assetassure.io/check-assets';
 
 export const validOptions = Object.freeze({
     publicToken: 'pk_test',

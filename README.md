@@ -2,7 +2,9 @@
 
 Browser library that observes JS and CSS resources loaded by a page and reports
 their URIs and types, together with the URL of the page that loaded them, to
-the AssetAssure API in batches.
+the AssetAssure API in batches. The page must be served from one of the payment
+page domains listed under API > Settings of the tenancy: the API refuses a batch
+reporting any other page.
 
 ## Install
 
@@ -13,8 +15,15 @@ npm install assetassure-resource-collector
 Or load the minified build from a CDN. It exposes the class as
 `window.AssetAssureResourceCollector`:
 
+Pin the exact version and add the `integrity` attribute shown on the API >
+Settings page of your tenancy, so the browser refuses to run a modified file:
+
 ```html
-<script src="https://unpkg.com/assetassure-resource-collector"></script>
+<script
+    src="https://cdn.jsdelivr.net/npm/assetassure-resource-collector@0.4.0/dist/assetassure-resource-collector.min.js"
+    integrity="sha384-..."
+    crossorigin="anonymous"
+></script>
 <script>
     new AssetAssureResourceCollector({
         publicToken: 'your-public-token',
@@ -56,23 +65,24 @@ const { ResourceCollector } = require('assetassure-resource-collector');
 | `resourceTypes`   | no       | `['js']`  | Any of `'js'`, `'css'`. See [Classification](#classification).              |
 | `batchSize`       | no       | `50`      | URIs per request. Keep bodies small: keepalive requests are capped at 64 KB. |
 | `flushIntervalMs` | no       | `2000`    | Periodic flush interval. `0` disables the timer.                            |
-| `signedUrlTtlMs`  | no       | `60000`   | How long a signed URL is reused before a fresh one is requested.            |
 | `onError`         | no       |           | Called with an `Error` when a request fails. Errors are otherwise swallowed. |
 
 ### Behaviour
 
-- Each batch is posted as
-    `{ "pageUrl": "<origin + pathname>", "resources": [{ "uri": "...", "type": "js" | "css" }, ...] }`.
-    The page URL is captured when the resource is observed, so single-page
-    applications get one batch per route. Query string and fragment are
-    stripped in the browser so session identifiers never leave the page.
-    `pageUrl` is omitted when `location` is unavailable.
+- Each batch is posted straight to `https://<apiDomain>/check-assets` as
+    `{ "pageUrl": "<origin + pathname>", "resources": [{ "uri": "...", "type": "js" | "css" }, ...] }`,
+    with the public token as Basic auth. The page URL is captured when the
+    resource is observed, so single-page applications get one batch per route.
+    Query string and fragment are stripped in the browser so session
+    identifiers never leave the page. `pageUrl` is omitted when `location` is
+    unavailable, in which case the API rejects the batch: it needs the page to
+    check it against the payment page domains of the tenancy.
 - Only resources not seen before on the current page URL are reported. The
     same resource is reported again when it is seen on another page.
 - Pending URIs are sent when a full batch accumulates, on the flush interval,
     when the page is hidden, on `pagehide`, and on `stop()`.
-- A rejected upload triggers one signed URL refresh and retry before the error
-    is reported.
+- A rejected upload (for example `403` when the page is not on an allowed
+    payment page domain) is reported through `onError` and not retried.
 - `start()` is a no-op where `PerformanceObserver` is unavailable.
 
 ### Classification
