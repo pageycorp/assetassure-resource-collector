@@ -142,11 +142,11 @@ describe('collection', () => {
             [
                 {
                     pageUrl: 'https://shop.example/checkout',
-                    resources: [{ uri: 'https://cdn.example/app.js', type: 'js' }],
+                            resources: [{ uri: 'https://cdn.example/app.js', type: 'js' }],
                 },
                 {
                     pageUrl: 'https://shop.example/checkout/payment',
-                    resources: [{ uri: 'https://js.stripe.com/v3/', type: 'js' }],
+                            resources: [{ uri: 'https://js.stripe.com/v3/', type: 'js' }],
                 },
             ],
         );
@@ -208,6 +208,76 @@ describe('collection', () => {
         const uploads = env.fetchCalls.filter((c) => c.url === CHECK_ASSETS_URL);
         assert.equal(uploads.length, 3);
         assert.deepEqual(uploads.map((u) => urisOf(u).length), [2, 2, 1]);
+    });
+
+    test('presents the page view token of the first batch on the batches that follow', async () => {
+        env.restore();
+        env = installBrowserGlobals({
+            fetchImpl: (url, init, call) => jsonResponse(call === 1 ? { status: 'ok', pageViewToken: 'token-1' } : { status: 'ok' }),
+        });
+        const collector = new ResourceCollector({ ...validOptions, batchSize: 2 }).start();
+        env.observers[0].emit(['https://a/1.js', 'https://a/2.js', 'https://a/3.js']);
+        await collector.flush();
+        env.observers[0].emit(['https://a/late.js']);
+        await collector.flush();
+
+        const uploads = env.fetchCalls.filter((c) => c.url === CHECK_ASSETS_URL);
+        assert.deepEqual(uploads.map((u) => u.body.pageViewToken), [undefined, 'token-1', 'token-1']);
+    });
+
+    test('keeps one page view token per page URL', async () => {
+        env.restore();
+        env = installBrowserGlobals({
+            fetchImpl: (url, init, call) => jsonResponse(call < 3 ? { status: 'ok', pageViewToken: `token-${call}` } : { status: 'ok' }),
+        });
+        const collector = new ResourceCollector(validOptions).start();
+        env.observers[0].emit(['https://a/1.js']);
+        await collector.flush();
+        Object.assign(globalThis.location, defaultLocation({ pathname: '/checkout/payment' }));
+        env.observers[0].emit(['https://a/2.js']);
+        await collector.flush();
+        env.observers[0].emit(['https://a/3.js']);
+        await collector.flush();
+
+        const uploads = env.fetchCalls.filter((c) => c.url === CHECK_ASSETS_URL);
+        assert.deepEqual(uploads.map((u) => [u.body.pageUrl, u.body.pageViewToken]), [
+            ['https://shop.example/checkout', undefined],
+            ['https://shop.example/checkout/payment', undefined],
+            ['https://shop.example/checkout/payment', 'token-2'],
+        ]);
+    });
+
+    test('adopts the new token when the API stops honouring the one presented', async () => {
+        env.restore();
+        env = installBrowserGlobals({
+            fetchImpl: (url, init, call) => jsonResponse(call === 2 ? { status: 'ok' } : { status: 'ok', pageViewToken: `token-${call}` }),
+        });
+        const collector = new ResourceCollector(validOptions).start();
+        for (const uri of ['https://a/1.js', 'https://a/2.js', 'https://a/3.js', 'https://a/4.js']) {
+            env.observers[0].emit([uri]);
+            await collector.flush();
+        }
+
+        const uploads = env.fetchCalls.filter((c) => c.url === CHECK_ASSETS_URL);
+        // The third batch presented token-1 and was answered with token-3 (expired on the API side)
+        assert.deepEqual(uploads.map((u) => u.body.pageViewToken), [undefined, 'token-1', 'token-1', 'token-3']);
+    });
+
+    test('a failed first batch leaves the next one without a token', async () => {
+        const errors = [];
+        env.restore();
+        env = installBrowserGlobals({
+            fetchImpl: (url, init, call) => (call === 1 ? jsonResponse({}, 500) : jsonResponse({ status: 'ok', pageViewToken: 'token-2' })),
+        });
+        const collector = new ResourceCollector({ ...validOptions, onError: (e) => errors.push(e) }).start();
+        for (const uri of ['https://a/1.js', 'https://a/2.js', 'https://a/3.js']) {
+            env.observers[0].emit([uri]);
+            await collector.flush();
+        }
+
+        const uploads = env.fetchCalls.filter((c) => c.url === CHECK_ASSETS_URL);
+        assert.equal(errors.length, 1);
+        assert.deepEqual(uploads.map((u) => u.body.pageViewToken), [undefined, undefined, 'token-2']);
     });
 
     test('sends Basic auth built from the public token', async () => {
