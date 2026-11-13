@@ -70,13 +70,24 @@ const { ResourceCollector } = require('assetassure-resource-collector');
 ### Behaviour
 
 - Each batch is posted straight to `https://<apiDomain>/check-assets` as
-    `{ "pageUrl": "<origin + pathname>", "resources": [{ "uri": "...", "type": "js" | "css" }, ...] }`,
+    `{ "pageUrl": "<origin + pathname>", "pageViewToken": "<token>", "resources": [{ "uri": "...", "type": "js" | "css" }, ...] }`,
     with the public token as Basic auth. The page URL is captured when the
     resource is observed, so single-page applications get one batch per route.
     Query string and fragment are stripped in the browser so session
     identifiers never leave the page. `pageUrl` is omitted when `location` is
     unavailable, in which case the API rejects the batch: it needs the page to
     check it against the payment page domains of the tenancy.
+- The API counts a batch without a `pageViewToken` as a new page view and
+    answers it with `{ "status": "ok", "pageViewToken": "<token>" }`. The
+    collector presents that token on the batches that follow for the same page
+    URL (resources that loaded after a flush), which are monitored but not
+    counted again. A page is therefore counted once per load, and once per
+    route in a single-page application, however many scripts it loads. The
+    token is bound to the page URL and the visitor's network address and
+    expires after 30 minutes: a page left open longer, or a visitor whose
+    address changes, is counted again and the collector adopts the new token.
+- Batches of the same page URL are sent one after the other so each can
+    present the token of the one before it.
 - Only resources not seen before on the current page URL are reported. The
     same resource is reported again when it is seen on another page.
 - Pending URIs are sent when a full batch accumulates, on the flush interval,

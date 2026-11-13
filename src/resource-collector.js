@@ -36,7 +36,9 @@ const DEFAULTS = Object.freeze({
 /**
  * Observes resources loaded by the current page and reports their URIs and
  * types to the AssetAssure API in batches, one batch per page URL so the API
- * can record which page loaded which resource. The page must be served from
+ * can record which page loaded which resource. The API answers the first
+ * batch of a page with a page view token; presenting it on the batches that
+ * follow is what makes a page count once however many batches it sends. The page must be served from
  * one of the payment page domains configured for the tenancy: the API refuses
  * any other page.
  *
@@ -58,6 +60,7 @@ export class ResourceCollector {
     #onError;
 
     #seen = new Set();
+    #pageViewTokens = new Map();
     #pending = [];
     #observer = null;
     #intervalId = null;
@@ -303,28 +306,59 @@ export class ResourceCollector {
     }
 
     #send(resources, pageUrl) {
-        const request = this.#postResources(resources, pageUrl)
-            .catch((error) => {
-                this.#reportError(error);
-            })
-            .finally(() => {
-                this.#inFlight.delete(request);
-            });
+        // The API counts a batch without a page view token as a new page view
+        // and answers it with a token. Batches of the same page wait for the
+        // one before them so they can present that token and not be counted
+        // again; when a batch fails, the next one simply goes without.
+        const previous = this.#pageViewTokens.get(pageUrl);
+        const post = (token) =>
+            this.#postResources(resources, pageUrl, token).then(
+                (issued) => issued ?? token,
+                (error) => {
+                    this.#reportError(error);
 
-        this.#inFlight.add(request);
+                    return token;
+                },
+            );
+
+        const request = previous === undefined ? post(null) : previous.then(post);
+        this.#pageViewTokens.set(pageUrl, request);
+
+        const tracked = request.finally(() => {
+            this.#inFlight.delete(tracked);
+        });
+
+        this.#inFlight.add(tracked);
     }
 
     /**
      * One POST straight to /check-assets: the public token in the Authorization
      * header is the only credential, there is no signed URL round trip.
+     *
+     * @returns {Promise<string|null>} The page view token the API issued, or
+     *     `null` when it accepted the one presented.
      */
-    async #postResources(resources, pageUrl) {
-        const body = JSON.stringify(pageUrl === null ? { resources } : { pageUrl, resources });
-        const response = await fetch(this.#checkAssetsEndpoint, this.#requestInit(body));
+    async #postResources(resources, pageUrl, pageViewToken) {
+        const payload = { resources };
+
+        if (pageUrl !== null) {
+            payload.pageUrl = pageUrl;
+        }
+        if (pageViewToken !== null) {
+            payload.pageViewToken = pageViewToken;
+        }
+
+        const response = await fetch(this.#checkAssetsEndpoint, this.#requestInit(JSON.stringify(payload)));
 
         if (!response.ok) {
             throw new Error(`ResourceCollector: asset check failed with HTTP ${response.status}`);
         }
+
+        const answer = await response.json().catch(() => null);
+
+        return answer !== null && typeof answer === 'object' && typeof answer.pageViewToken === 'string'
+            ? answer.pageViewToken
+            : null;
     }
 
     #requestInit(body) {
